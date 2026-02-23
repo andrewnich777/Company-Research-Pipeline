@@ -32,18 +32,32 @@ COLORS = {
         "accent": (236, 254, 255),
         "highlight": (34, 211, 238),
     },
+    "Executive": {
+        "primary": (124, 58, 237),      # Purple
+        "secondary": (109, 40, 217),
+        "accent": (245, 243, 255),
+        "highlight": (167, 139, 250),
+    },
 }
 
-# Confidence badge colors
+# Evidence classification badge colors (V/S/I/U system)
+EVIDENCE_COLORS = {
+    "V": {"bg": (220, 252, 231), "text": (22, 101, 52), "label": "[V] Verified"},
+    "S": {"bg": (254, 249, 195), "text": (133, 77, 14), "label": "[S] Sourced"},
+    "I": {"bg": (219, 234, 254), "text": (30, 64, 175), "label": "[I] Inferred"},
+    "U": {"bg": (243, 244, 246), "text": (107, 114, 128), "label": "[U] Unknown"},
+}
+
+# Legacy confidence badge colors (for backwards compatibility)
 CONFIDENCE_COLORS = {
-    "HIGH": {"bg": (220, 252, 231), "text": (22, 101, 52), "label": "High Confidence"},
-    "MEDIUM": {"bg": (254, 249, 195), "text": (133, 77, 14), "label": "Medium Confidence"},
-    "LOW": {"bg": (254, 226, 226), "text": (153, 27, 27), "label": "Low Confidence"},
+    "HIGH": {"bg": (220, 252, 231), "text": (22, 101, 52), "label": "[V]"},
+    "MEDIUM": {"bg": (254, 249, 195), "text": (133, 77, 14), "label": "[S]"},
+    "LOW": {"bg": (219, 234, 254), "text": (30, 64, 175), "label": "[I]"},
 }
 
 # Source tier badges
 SOURCE_TIER_LABELS = {
-    "TIER_0": {"label": "Official Source", "color": (22, 101, 52)},
+    "TIER_0": {"label": "Official", "color": (22, 101, 52)},
     "TIER_1": {"label": "Verified", "color": (30, 64, 175)},
     "TIER_2": {"label": "Inferred", "color": (107, 114, 128)},
 }
@@ -204,52 +218,36 @@ class BriefPDF(FPDF):
         if source:
             source = sanitize_text(source)
 
-        # Background
         start_y = self.get_y()
-        self.set_fill_color(*self.colors["accent"])
 
-        # Left border
+        # Set up styling
+        self.set_fill_color(*self.colors["accent"])
         self.set_draw_color(*self.colors["primary"])
         self.set_line_width(1)
 
-        # Quote text
-        self.set_x(self.l_margin + 3)
-        self.set_font("Helvetica", "I", 10)
-        self.set_text_color(30, 64, 175)
-
-        # Calculate height needed
-        self.multi_cell(self.w - self.l_margin - self.r_margin - 6, 5, f'"{sanitize_text(text)}"')
-
-        if source:
-            self.set_font("Helvetica", "", 8)
-            self.set_text_color(107, 114, 128)
-            self.set_x(self.l_margin + 3)
-            self.cell(0, 5, f"- {sanitize_text(source)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-        end_y = self.get_y()
-
-        # Draw background and border
-        self.set_fill_color(*self.colors["accent"])
-        self.rect(self.l_margin, start_y - 2, self.w - self.l_margin - self.r_margin, end_y - start_y + 4, 'F')
-        self.set_draw_color(*self.colors["primary"])
-        self.line(self.l_margin, start_y - 2, self.l_margin, end_y + 2)
-
-        # Rewrite text on top of background
-        self.set_y(start_y)
+        # Quote text with background fill (single write, no duplication)
         self.set_x(self.l_margin + 5)
         self.set_font("Helvetica", "I", 10)
         self.set_text_color(30, 64, 175)
-        self.multi_cell(self.w - self.l_margin - self.r_margin - 10, 5, f'"{sanitize_text(text)}"')
+        self.multi_cell(self.w - self.l_margin - self.r_margin - 10, 5, f'"{text}"', fill=True)
 
+        # Source attribution
         if source:
             self.set_font("Helvetica", "", 8)
             self.set_text_color(107, 114, 128)
             self.set_x(self.l_margin + 5)
-            self.cell(0, 5, f"- {sanitize_text(source)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            self.set_fill_color(*self.colors["accent"])
+            self.cell(0, 5, f"- {source}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+
+        end_y = self.get_y()
+
+        # Draw left border accent line
+        self.set_draw_color(*self.colors["primary"])
+        self.line(self.l_margin, start_y, self.l_margin, end_y)
 
         self.set_text_color(0, 0, 0)
         self.set_line_width(0.2)
-        self.ln(5)
+        self.ln(3)
 
     def table_start(self, headers: list[str]):
         """Start a table with headers."""
@@ -695,9 +693,13 @@ def parse_markdown_to_pdf(md_content: str, pdf: BriefPDF):
                 pdf.table_end()
                 in_table = False
             text = sanitize_text(line.strip('*'))
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.multi_cell(0, 5, text)
-            pdf.set_font("Helvetica", "", 10)
+            try:
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 5, text)
+                pdf.set_font("Helvetica", "", 10)
+            except Exception:
+                pass
 
         # Regular paragraph
         elif not line.startswith('*Generated'):
@@ -707,8 +709,14 @@ def parse_markdown_to_pdf(md_content: str, pdf: BriefPDF):
             # Clean up markdown
             text = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
             text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-            if text:
-                pdf.paragraph(text)
+            # Clean up source citations like ^🟢1^
+            text = re.sub(r'\^\S+\d+\^', '', text)
+            if text.strip():
+                try:
+                    pdf.paragraph(text)
+                except Exception:
+                    # Skip lines that can't be rendered
+                    pass
 
         i += 1
 
@@ -782,6 +790,7 @@ def generate_all_pdfs(
     sales_brief: str,
     security_brief: str,
     product_brief: str,
+    executive_brief: str = None,
     synthesis_data: Optional[dict] = None,
     profile_data: Optional[dict] = None
 ) -> dict[str, str]:
@@ -794,6 +803,7 @@ def generate_all_pdfs(
         sales_brief: Sales brief markdown
         security_brief: Security brief markdown
         product_brief: Product brief markdown
+        executive_brief: Executive brief markdown (optional)
         synthesis_data: Optional synthesis output for executive summary
         profile_data: Optional company profile data
 
@@ -811,17 +821,25 @@ def generate_all_pdfs(
         ("Product", product_brief, "product_brief.pdf"),
     ]
 
+    # Add executive brief if provided
+    if executive_brief:
+        briefs.append(("Executive", executive_brief, "executive_brief.pdf"))
+
     for brief_type, content, filename in briefs:
         pdf_path = output_dir / filename
         title = f"{company_name} - {brief_type} Brief"
+
+        # Only Executive brief gets the executive summary page
+        # Other briefs dive straight into their stakeholder-specific content
+        include_exec_summary = brief_type == "Executive"
 
         if generate_pdf(
             content,
             str(pdf_path),
             title,
             brief_type,
-            synthesis_data=synthesis_data,
-            profile_data=profile_data
+            synthesis_data=synthesis_data if include_exec_summary else None,
+            profile_data=profile_data if include_exec_summary else None
         ):
             pdfs[brief_type.lower()] = str(pdf_path)
 

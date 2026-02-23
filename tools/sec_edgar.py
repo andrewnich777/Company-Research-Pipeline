@@ -9,6 +9,10 @@ import httpx
 from typing import Optional
 from dataclasses import dataclass
 
+from logger import get_logger
+
+logger = get_logger(__name__)
+
 
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
@@ -41,8 +45,10 @@ class SECEdgarTool:
     async def lookup_cik(self, ticker: str) -> Optional[str]:
         """Look up CIK number from ticker symbol."""
         ticker = ticker.upper()
+        logger.debug(f"Looking up CIK for ticker: {ticker}")
 
         if ticker in self.ticker_to_cik_cache:
+            logger.debug(f"CIK cache hit for {ticker}")
             return self.ticker_to_cik_cache[ticker]
 
         try:
@@ -59,15 +65,24 @@ class SECEdgarTool:
                         if entry.get("ticker", "").upper() == ticker:
                             cik = str(entry.get("cik_str", ""))
                             self.ticker_to_cik_cache[ticker] = cik
+                            logger.debug(f"Found CIK {cik} for {ticker}")
                             return cik
-        except Exception:
-            pass
+
+            logger.warning(f"CIK not found for ticker: {ticker}")
+
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout looking up CIK for {ticker}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP error looking up CIK for {ticker}: {e.response.status_code}")
+        except Exception as e:
+            logger.exception(f"Unexpected error looking up CIK for {ticker}")
 
         return None
 
     async def get_company_info(self, cik: str) -> dict:
         """Get company information from SEC."""
         cik_padded = cik.zfill(10)
+        logger.debug(f"Fetching company info for CIK: {cik_padded}")
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -76,9 +91,17 @@ class SECEdgarTool:
                     headers=HEADERS
                 )
                 if resp.status_code == 200:
+                    logger.debug(f"Successfully fetched company info for CIK {cik_padded}")
                     return resp.json()
-        except Exception:
-            pass
+                else:
+                    logger.warning(f"HTTP {resp.status_code} fetching company info for CIK {cik_padded}")
+
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout fetching company info for CIK {cik_padded}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP error fetching company info for CIK {cik_padded}: {e.response.status_code}")
+        except Exception as e:
+            logger.exception(f"Unexpected error fetching company info for CIK {cik_padded}")
 
         return {}
 

@@ -8,7 +8,7 @@ This agent mines customer reviews to understand:
 - Implementation complexity signals
 """
 
-from .base import BaseAgent
+from .base import BaseAgent, URL_BANK_INSTRUCTIONS, JSON_OUTPUT_RULES, build_url_bank_section
 from models import (
     CompanyProfile, CustomerReviewInsights, Claim, Evidence,
     Confidence, SourceTier
@@ -17,7 +17,9 @@ from models import (
 
 CUSTOMER_REVIEWS_SYSTEM_PROMPT = """You are a customer intelligence agent for Fluency AI deployment research.
 
-Your goal is to extract REAL customer perspectives from review platforms - understanding what users actually experience vs. what companies claim in their marketing.
+Your goal is to extract REAL customer perspectives from review platforms.
+
+""" + URL_BANK_INSTRUCTIONS + """
 
 ## WHY THIS MATTERS
 - Reviews reveal actual pain points (opportunity areas for Fluency)
@@ -27,13 +29,9 @@ Your goal is to extract REAL customer perspectives from review platforms - under
 
 ## YOUR RESEARCH PROCESS
 
-1. SEARCH REVIEW PLATFORMS
-   Use web_search and web_fetch to find:
-   - G2.com reviews for the company's products
-   - Capterra reviews
-   - TrustRadius reviews
-   - Search: "{company} reviews site:g2.com"
-   - Search: "{company} reviews site:capterra.com"
+1. CHECK PRE-DISCOVERED URLs FIRST
+   If G2, Capterra, or Glassdoor URLs are provided, fetch them directly.
+   Only search if URLs are not provided or don't work.
 
 2. EXTRACT PAIN POINTS
    From negative reviews, identify:
@@ -121,7 +119,8 @@ Return your findings as JSON:
 - HIGH: Pattern across 3+ reviews
 - MEDIUM: Mentioned in 2 reviews or single detailed review
 - LOW: Single brief mention
-"""
+
+""" + JSON_OUTPUT_RULES
 
 
 class CustomerReviewsAgent(BaseAgent):
@@ -145,18 +144,37 @@ class CustomerReviewsAgent(BaseAgent):
         """
         Research customer reviews for a company to extract pain points and sentiment.
         """
+        # Build URL bank section if available
+        url_bank = profile.url_bank
+        url_bank_section = ""
+        if url_bank:
+            urls = []
+            if url_bank.g2_page:
+                urls.append(f"- G2 Reviews: {url_bank.g2_page}")
+            if url_bank.capterra_page:
+                urls.append(f"- Capterra Reviews: {url_bank.capterra_page}")
+            if url_bank.glassdoor_page:
+                urls.append(f"- Glassdoor: {url_bank.glassdoor_page}")
+
+            if urls:
+                url_bank_section = f"""
+## PRE-DISCOVERED URLs (fetch these FIRST, avoid searching)
+{chr(10).join(urls)}
+
+IMPORTANT: Fetch these URLs directly. Only search if these don't provide enough information.
+"""
+
         prompt = f"""Research customer reviews for {profile.name} (domain: {profile.domain}).
 
 Company Context:
 - Industry: {profile.industry}
 - Type: {profile.company_type.value}
 - Description: {profile.description[:200] if profile.description else 'Unknown'}
-
-Search these sources:
+{url_bank_section}
+{"If no pre-discovered URLs above, search these sources:" if not url_bank_section else "If pre-discovered URLs don't work or need more data, search:"}
 1. "{profile.name} reviews site:g2.com"
 2. "{profile.name} reviews site:capterra.com"
 3. "{profile.name} reviews site:trustradius.com"
-4. "{profile.name} customer reviews"
 
 Focus on:
 - Pain points and frustrations users mention

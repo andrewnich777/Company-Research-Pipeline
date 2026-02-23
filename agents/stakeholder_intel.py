@@ -9,7 +9,7 @@ This agent builds relationship intelligence:
 - Conference speakers and thought leaders
 """
 
-from .base import BaseAgent
+from .base import BaseAgent, URL_BANK_INSTRUCTIONS, JSON_OUTPUT_RULES, build_url_bank_section
 from models import (
     CompanyProfile, StakeholderIntelligence, Stakeholder, Claim, Evidence,
     Confidence, SourceTier
@@ -18,7 +18,9 @@ from models import (
 
 STAKEHOLDER_INTEL_SYSTEM_PROMPT = """You are a stakeholder intelligence agent for Fluency AI deployment research.
 
-Your goal is to map decision-makers and identify potential champions for a Fluency deployment - the people who would advocate internally for the solution.
+""" + URL_BANK_INSTRUCTIONS + """
+
+Your goal is to map decision-makers and identify potential champions for a Fluency deployment.
 
 ## WHY THIS MATTERS
 - Knowing the CTO/CIO background helps tailor the pitch
@@ -30,11 +32,11 @@ Your goal is to map decision-makers and identify potential champions for a Fluen
 
 1. FIND EXECUTIVE TEAM
    Search for leadership page:
-   - {company}.com/about/leadership
-   - {company}.com/team
-   - {company}.com/about-us
-   - "{company} leadership team"
-   - "{company} CTO" or "{company} CIO" or "{company} VP Engineering"
+   - {{company}}.com/about/leadership
+   - {{company}}.com/team
+   - {{company}}.com/about-us
+   - "{{company}} leadership team"
+   - "{{company}} CTO" or "{{company}} CIO" or "{{company}} VP Engineering"
 
 2. RESEARCH TECHNICAL LEADERS
    For each technical leader found:
@@ -53,12 +55,12 @@ Your goal is to map decision-makers and identify potential champions for a Fluen
 
 4. CHECK FOR CONFERENCE SPEAKERS
    Search for:
-   - "{person} conference speaker"
-   - "{company} speaker" at relevant conferences
+   - "{{person}} conference speaker"
+   - "{{company}} speaker" at relevant conferences
    - People who speak about automation, AI, or process improvement
 
 5. LOOK FOR GITHUB PRESENCE
-   - github.com/{company}
+   - github.com/{{company}}
    - Active open source contributors from the company
    - Engineering blog posts
 
@@ -147,7 +149,8 @@ Look for these indicators that someone might champion Fluency:
 - Spoke about automation or AI at conferences
 - Background at companies known for operational excellence
 - Recently hired (eager to make impact)
-"""
+
+""" + JSON_OUTPUT_RULES
 
 
 class StakeholderIntelAgent(BaseAgent):
@@ -171,15 +174,21 @@ class StakeholderIntelAgent(BaseAgent):
         """
         Research stakeholders and decision-makers for a company.
         """
+        # Build URL bank section using shared helper
+        url_bank_section = build_url_bank_section(
+            profile.url_bank,
+            relevant_fields=["linkedin_company", "linkedin_executives", "about_page"]
+        )
+
         prompt = f"""Research stakeholders and decision-makers for {profile.name} (domain: {profile.domain}).
 
 Company Context:
 - Industry: {profile.industry}
 - Type: {profile.company_type.value}
 - Size: {profile.employee_count or 'Unknown'}
-
+{url_bank_section}
 Research Process:
-1. Find the leadership/about page: https://{profile.domain}/about or /team or /leadership
+1. {"Fetch pre-discovered LinkedIn URLs above, then" if url_bank_section else "Find"} the leadership/about page
 2. Search: "{profile.name} CTO" and "{profile.name} CIO" and "{profile.name} VP Engineering"
 3. Look for technical leaders who might champion process automation
 4. Search for conference speakers from the company
@@ -191,7 +200,8 @@ For Fluency AI deployment, the ideal champions are:
 - Platform Engineering leaders
 - Digital Transformation executives
 
-Return comprehensive JSON with all stakeholders found, their backgrounds, and champion potential."""
+Return comprehensive JSON with all stakeholders found, their backgrounds, and champion potential.
+{self.search_context}"""
 
         result = await self.run(prompt)
 

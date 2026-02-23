@@ -7,14 +7,94 @@ import json
 import os
 import anthropic
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 from tools.tool_definitions import TOOL_DEFINITIONS, execute_tool, get_tools_for_agent
+from config import get_config, get_model_for_agent, get_tool_limit_for_agent
+from logger import get_logger
 
 
-# Rate limit retry settings
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 30  # seconds
+# Module logger
+logger = get_logger(__name__)
+
+
+# =============================================================================
+# Shared Prompt Sections - Reduce token usage by standardizing common instructions
+# =============================================================================
+
+URL_BANK_INSTRUCTIONS = """## MANDATORY: URL BANK USAGE (Cost Optimization)
+Pre-discovered URLs are provided below. You MUST:
+1. Fetch ALL relevant pre-discovered URLs BEFORE using web_search
+2. Only use web_search if URL bank lacks the specific information needed
+3. Each fetch costs 1 unit, each search costs 5 units - optimize accordingly
+
+If you search before exhausting relevant URLs, you are wasting API budget."""
+
+CITATION_RULES = """## Citation Format
+- [V] Verified: URL + direct quote from Tier 0/1 source (official, SEC, major news)
+- [S] Sourced: URL + excerpt from Tier 1/2 source
+- [I] Inferred: Derived from multiple signals (explain reasoning)
+- [U] Unknown: Searched but information not found"""
+
+JSON_OUTPUT_RULES = """## Output Format
+Return findings as valid JSON in a ```json code block. Ensure all strings are properly escaped."""
+
+
+def build_url_bank_section(url_bank, relevant_fields: list[str] = None) -> str:
+    """
+    Build a URL bank section for agent prompts.
+
+    Args:
+        url_bank: The URLBank object from CompanyProfile
+        relevant_fields: List of field names to include (None = all available)
+
+    Returns:
+        Formatted string with pre-discovered URLs
+    """
+    if not url_bank:
+        return ""
+
+    # Map of field names to labels
+    field_map = {
+        "trust_center": ("Trust Center", url_bank.trust_center),
+        "security_page": ("Security Page", url_bank.security_page),
+        "privacy_policy": ("Privacy Policy", url_bank.privacy_policy),
+        "compliance_page": ("Compliance Page", url_bank.compliance_page),
+        "linkedin_company": ("LinkedIn Company", url_bank.linkedin_company),
+        "g2_page": ("G2 Reviews", url_bank.g2_page),
+        "capterra_page": ("Capterra Reviews", url_bank.capterra_page),
+        "glassdoor_page": ("Glassdoor", url_bank.glassdoor_page),
+        "careers_page": ("Careers Page", url_bank.careers_page),
+        "about_page": ("About Page", url_bank.about_page),
+        "news_articles": ("News Articles", url_bank.news_articles[:5] if url_bank.news_articles else []),
+        "press_releases": ("Press Releases", url_bank.press_releases[:3] if url_bank.press_releases else []),
+        "linkedin_executives": ("LinkedIn Executives", url_bank.linkedin_executives[:5] if url_bank.linkedin_executives else []),
+        "job_board_urls": ("Job Boards", url_bank.job_board_urls[:3] if url_bank.job_board_urls else []),
+        "regulatory_mentions": ("Regulatory/News", url_bank.regulatory_mentions[:3] if url_bank.regulatory_mentions else []),
+        "sec_filings": ("SEC Filings", url_bank.sec_filings[:3] if url_bank.sec_filings else []),
+    }
+
+    urls = []
+    fields_to_use = relevant_fields or field_map.keys()
+
+    for field in fields_to_use:
+        if field not in field_map:
+            continue
+        label, value = field_map[field]
+        if value:
+            if isinstance(value, list):
+                if value:
+                    urls.append(f"- {label}: {', '.join(value[:3])}")
+            else:
+                urls.append(f"- {label}: {value}")
+
+    if not urls:
+        return ""
+
+    return f"""
+## PRE-DISCOVERED URLs (FETCH THESE FIRST)
+{chr(10).join(urls)}
+"""
 
 
 # Global API key storage - set once at startup
@@ -26,6 +106,7 @@ def set_api_key(key: str):
     global _API_KEY
     _API_KEY = key
     os.environ["ANTHROPIC_API_KEY"] = key
+    logger.debug("API key set globally")
 
 
 def get_api_key() -> str | None:
@@ -43,20 +124,62 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-20250514",
+        model: str | None = None,
         max_tokens: int = 4096,
-        max_tool_calls: int = 20,
+        max_tool_calls: int | None = None,
         api_key: str | None = None,
     ):
+        config = get_config()
+
         # Use provided key, global key, or environment variable
         key = api_key or get_api_key()
+        # Let SDK handle retries with proper retry-after header parsing
         if key:
-            self.client = anthropic.Anthropic(api_key=key)
+            self.client = anthropic.Anthropic(api_key=key, max_retries=5)
         else:
-            self.client = anthropic.Anthropic()
-        self.model = model
+            self.client = anthropic.Anthropic(max_retries=5)
+
+        # Store explicit model override, otherwise use lazy lookup
+        self._explicit_model = model
         self.max_tokens = max_tokens
-        self.max_tool_calls = max_tool_calls
+        # Store explicit tool limit override, otherwise use lazy lookup
+        self._explicit_tool_limit = max_tool_calls
+        self._config = config
+        self._hit_rate_limit = False  # Track if rate limit was encountered
+
+        # Search monitoring
+        self._web_search_count = 0
+        self._web_fetch_count = 0
+        self._search_queries = []  # Track actual queries for monitoring
+
+        # Search context from pipeline (to avoid duplicate queries)
+        self._search_context = ""
+
+    @property
+    def model(self) -> str:
+        """Get the model for this agent - uses routing based on agent name."""
+        if self._explicit_model:
+            return self._explicit_model
+        # Use agent-specific model routing (Haiku for data gathering, Sonnet for reasoning)
+        return get_model_for_agent(self.name)
+
+    @model.setter
+    def model(self, value: str):
+        """Allow explicit model override."""
+        self._explicit_model = value
+
+    @property
+    def max_tool_calls(self) -> int:
+        """Get the max tool calls for this agent - uses routing based on agent name."""
+        if self._explicit_tool_limit is not None:
+            return self._explicit_tool_limit
+        # Use agent-specific tool limit routing
+        return get_tool_limit_for_agent(self.name)
+
+    @max_tool_calls.setter
+    def max_tool_calls(self, value: int):
+        """Allow explicit tool limit override."""
+        self._explicit_tool_limit = value
 
     @property
     @abstractmethod
@@ -89,6 +212,26 @@ class BaseAgent(ABC):
 
         return tools
 
+    def reset_search_stats(self):
+        """Reset search monitoring counters before a new run."""
+        self._web_search_count = 0
+        self._web_fetch_count = 0
+        self._search_queries = []
+
+    @property
+    def search_stats(self) -> dict:
+        """Get current search statistics."""
+        return {
+            "web_search_count": self._web_search_count,
+            "web_fetch_count": self._web_fetch_count,
+            "search_queries": self._search_queries.copy(),
+        }
+
+    @property
+    def search_context(self) -> str:
+        """Get search context from pipeline (previously searched queries)."""
+        return self._search_context or ""
+
     async def execute_tool_call(self, tool_name: str, tool_input: dict) -> Any:
         """
         Execute a tool call and return the result.
@@ -104,6 +247,10 @@ class BaseAgent(ABC):
         Handles the tool use loop automatically.
         Returns the final response and any structured data extracted.
         """
+        # Reset search stats for this run
+        self.reset_search_stats()
+
+        logger.debug(f"[{self.name}] Using model: {self.model}")
         messages = [{"role": "user", "content": user_message}]
         tool_definitions = self.get_tool_definitions()
 
@@ -120,21 +267,45 @@ class BaseAgent(ABC):
             if tool_definitions:
                 api_kwargs["tools"] = tool_definitions
 
-            # Retry with exponential backoff on rate limit errors
+            # Handle rate limits properly - wait and retry, never skip
             response = None
-            for retry in range(MAX_RETRIES):
+            max_rate_limit_retries = 10  # Will retry up to 10 times for rate limits
+
+            for rate_limit_attempt in range(max_rate_limit_retries):
                 try:
+                    # SDK has max_retries=5 for quick transient errors
                     response = self.client.messages.create(**api_kwargs)
-                    break  # Success, exit retry loop
+
+                    # If we recovered from rate limit, add buffer to let bucket refill
+                    if rate_limit_attempt > 0:
+                        self._hit_rate_limit = True
+                        logger.info(f"[{self.name}] Rate limit recovered, adding 30s buffer")
+                        await asyncio.sleep(30)
+
+                    break  # Success - exit retry loop
+
                 except anthropic.RateLimitError as e:
-                    if retry == MAX_RETRIES - 1:
-                        raise  # Final retry failed, propagate error
-                    backoff = INITIAL_BACKOFF * (2 ** retry)
-                    print(f"  [{self.name}] Rate limited, waiting {backoff}s (retry {retry + 1}/{MAX_RETRIES})...")
-                    await asyncio.sleep(backoff)
+                    if rate_limit_attempt == max_rate_limit_retries - 1:
+                        logger.error(f"[{self.name}] Rate limit exceeded after {max_rate_limit_retries} attempts")
+                        raise
+
+                    # Extract wait time from error message or headers
+                    wait_time = 60  # Default: wait full minute for per-minute limits
+
+                    try:
+                        # Try to get retry-after from response
+                        if hasattr(e, 'response') and e.response is not None:
+                            retry_after = e.response.headers.get('retry-after')
+                            if retry_after:
+                                wait_time = int(float(retry_after)) + 5  # Add 5s buffer
+                    except (ValueError, AttributeError, TypeError):
+                        pass
+
+                    logger.warning(f"[{self.name}] Rate limited, waiting {wait_time}s then retrying (attempt {rate_limit_attempt + 1}/{max_rate_limit_retries})")
+                    await asyncio.sleep(wait_time)
 
             if response is None:
-                raise RuntimeError("Failed to get response from API")
+                raise RuntimeError(f"[{self.name}] Failed to get response after rate limit retries")
 
             # Check if we're done (no tool use)
             if response.stop_reason == "end_turn":
@@ -155,11 +326,19 @@ class BaseAgent(ABC):
                         # Skip server-side tools - Claude handles these automatically
                         if block.name == "web_search":
                             tool_call_count += 1
-                            print(f"  [{self.name}] Web search (handled by Claude)...")
+                            self._web_search_count += 1
+                            # Track query for monitoring
+                            query = block.input.get("query", "") if hasattr(block, "input") else ""
+                            if query:
+                                self._search_queries.append(query)
+                            logger.info(f"[{self.name}] Web search #{self._web_search_count}: {query[:50]}...")
                             continue
 
                         tool_call_count += 1
-                        print(f"  [{self.name}] Calling {block.name}...")
+                        # Track web_fetch calls for monitoring
+                        if block.name == "web_fetch":
+                            self._web_fetch_count += 1
+                        logger.info(f"[{self.name}] Calling {block.name}")
 
                         result = await self.execute_tool_call(
                             block.name,
@@ -214,7 +393,14 @@ class BaseAgent(ABC):
             "usage": {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
-            }
+            },
+            "hit_rate_limit": self._hit_rate_limit,
+            # Search monitoring stats
+            "search_stats": {
+                "web_search_count": self._web_search_count,
+                "web_fetch_count": self._web_fetch_count,
+                "search_queries": self._search_queries.copy(),
+            },
         }
 
 

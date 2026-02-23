@@ -6,7 +6,35 @@ are handled by the tool handlers.
 """
 
 import httpx
+import time
 from typing import Any, Callable
+from urllib.parse import urlparse
+
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# =============================================================================
+# Fetch Cache - Reduces redundant HTTP requests across agents
+# =============================================================================
+_fetch_cache: dict[str, tuple[dict, float]] = {}
+CACHE_TTL_SECONDS = 3600  # 1 hour
+
+
+def get_cache_stats() -> dict:
+    """Get current cache statistics."""
+    return {
+        "cached_urls": len(_fetch_cache),
+        "urls": list(_fetch_cache.keys())[:20],  # First 20 for debugging
+    }
+
+
+def clear_fetch_cache():
+    """Clear the fetch cache (useful between pipeline runs)."""
+    global _fetch_cache
+    _fetch_cache.clear()
+    logger.debug("Fetch cache cleared")
 
 # Tool definitions for Claude API
 WEB_FETCH_TOOL = {
@@ -96,52 +124,177 @@ def get_tools_for_agent(tool_names: list[str]) -> list[dict]:
 # Tool Handlers - Execute the actual tool calls
 # ============================================================================
 
+def validate_url(url: str) -> tuple[bool, str]:
+    """
+    Validate and normalize a URL.
+
+    Returns:
+        Tuple of (is_valid, normalized_url_or_error_message)
+    """
+    if not url or not isinstance(url, str):
+        return False, "URL must be a non-empty string"
+
+    # Add scheme if missing
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    try:
+        parsed = urlparse(url)
+
+        # Validate basic URL structure
+        if not parsed.netloc:
+            return False, "URL must have a valid domain"
+
+        # Check for valid scheme
+        if parsed.scheme not in ("http", "https"):
+            return False, "URL must use http or https scheme"
+
+        # Basic domain validation
+        domain = parsed.netloc
+        if "." not in domain and domain != "localhost":
+            return False, f"Invalid domain: {domain}"
+
+        return True, url
+
+    except Exception as e:
+        return False, f"URL parsing error: {str(e)}"
+
+
+def extract_text_from_html(html_content: str, max_length: int = 15000) -> str:
+    """
+    Extract readable text from HTML content.
+
+    Uses BeautifulSoup if available, falls back to regex.
+    """
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        # Remove script and style elements
+        for element in soup(["script", "style", "nav", "footer", "header"]):
+            element.decompose()
+
+        # Get text
+        text = soup.get_text(separator=" ", strip=True)
+
+        # Normalize whitespace
+        import re
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        if len(text) > max_length:
+            text = text[:max_length] + "... [truncated]"
+
+        return text
+
+    except ImportError:
+        # Fallback to regex-based extraction
+        logger.debug("BeautifulSoup not available, using regex fallback for HTML parsing")
+        import re
+        content = html_content
+        content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<[^>]+>', ' ', content)
+        content = re.sub(r'\s+', ' ', content).strip()
+
+        if len(content) > max_length:
+            content = content[:max_length] + "... [truncated]"
+
+        return content
+
+
 async def handle_web_fetch(url: str, extract_prompt: str = None) -> dict:
     """
     Fetch a URL and return its content.
 
-    In a real implementation, this would use a proper web fetching service.
-    For the demo, we use httpx with basic HTML text extraction.
+    Args:
+        url: The URL to fetch
+        extract_prompt: Optional prompt for extraction (not currently used)
+
+    Returns:
+        Dict with success status, content or error message
     """
+    # Validate URL
+    is_valid, result = validate_url(url)
+    if not is_valid:
+        logger.warning(f"Invalid URL rejected: {url} - {result}")
+        return {
+            "success": False,
+            "url": url,
+            "error": f"Invalid URL: {result}"
+        }
+
+    validated_url = result
+
+    # Check cache first (normalize URL for cache key)
+    cache_key = validated_url.lower().rstrip('/')
+    if cache_key in _fetch_cache:
+        cached_result, cached_at = _fetch_cache[cache_key]
+        if time.time() - cached_at < CACHE_TTL_SECONDS:
+            logger.info(f"Cache hit for {validated_url}")
+            return {**cached_result, "from_cache": True}
+        else:
+            # Expired - remove from cache
+            del _fetch_cache[cache_key]
+
+    logger.debug(f"Fetching URL: {validated_url}")
+
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "FluencyAI-Research/1.0 (https://fluency.ai)"
             }
-            response = await client.get(url, headers=headers)
+            response = await client.get(validated_url, headers=headers)
             response.raise_for_status()
 
-            # Basic HTML to text conversion
-            content = response.text
+            # Extract text content from HTML
+            content = extract_text_from_html(response.text)
 
-            # Strip script and style tags (basic)
-            import re
-            content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            content = re.sub(r'<[^>]+>', ' ', content)
-            content = re.sub(r'\s+', ' ', content).strip()
+            logger.debug(f"Successfully fetched {validated_url} - {len(content)} chars")
 
-            # Truncate if too long
-            if len(content) > 15000:
-                content = content[:15000] + "... [truncated]"
-
-            return {
+            result = {
                 "success": True,
                 "url": str(response.url),
                 "status_code": response.status_code,
                 "content": content
             }
+
+            # Cache successful results
+            _fetch_cache[cache_key] = (result, time.time())
+
+            return result
+
     except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.reason_phrase}"
+        logger.warning(f"HTTP error fetching {validated_url}: {error_msg}")
         return {
             "success": False,
-            "url": url,
-            "error": f"HTTP {e.response.status_code}: {str(e)}"
+            "url": validated_url,
+            "error": error_msg
         }
-    except Exception as e:
+
+    except httpx.TimeoutException:
+        logger.warning(f"Timeout fetching {validated_url}")
         return {
             "success": False,
-            "url": url,
-            "error": str(e)
+            "url": validated_url,
+            "error": "Request timed out after 30 seconds"
+        }
+
+    except httpx.RequestError as e:
+        logger.warning(f"Request error fetching {validated_url}: {str(e)}")
+        return {
+            "success": False,
+            "url": validated_url,
+            "error": f"Request failed: {str(e)}"
+        }
+
+    except Exception as e:
+        logger.exception(f"Unexpected error fetching {validated_url}")
+        return {
+            "success": False,
+            "url": validated_url,
+            "error": f"Unexpected error: {str(e)}"
         }
 
 
@@ -153,6 +306,27 @@ async def handle_crt_sh_lookup(domain: str) -> dict:
     Query crt.sh for SSL certificate transparency data.
     Returns list of subdomains found in certificate logs.
     """
+    logger.debug(f"Looking up certificate transparency data for: {domain}")
+
+    # Validate domain
+    if not domain or not isinstance(domain, str):
+        logger.warning("Invalid domain provided to crt.sh lookup")
+        return {
+            "success": False,
+            "domain": domain,
+            "error": "Domain must be a non-empty string"
+        }
+
+    # Basic domain validation
+    domain = domain.lower().strip()
+    if "." not in domain:
+        logger.warning(f"Invalid domain format: {domain}")
+        return {
+            "success": False,
+            "domain": domain,
+            "error": "Invalid domain format"
+        }
+
     try:
         url = f"https://crt.sh/?q=%.{domain}&output=json"
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -179,7 +353,7 @@ async def handle_crt_sh_lookup(domain: str) -> dict:
                 "other": []
             }
 
-            identity_patterns = ["sso", "okta", "auth", "login", "identity", "saml"]
+            identity_patterns = ["sso", "okta", "auth", "login", "identity", "saml", "ping", "sts", "adfs", "idp", "azure", "onelogin", "duo", "jumpcloud"]
             regional_patterns = ["eu", "apac", "us-", "uk", "asia", "emea"]
             infra_patterns = ["api", "vpn", "cdn", "staging", "dev", "prod"]
             trust_patterns = ["trust", "security", "compliance"]
@@ -197,6 +371,8 @@ async def handle_crt_sh_lookup(domain: str) -> dict:
                 else:
                     categories["other"].append(sub)
 
+            logger.debug(f"Found {len(subdomains)} subdomains for {domain}")
+
             return {
                 "success": True,
                 "domain": domain,
@@ -204,11 +380,29 @@ async def handle_crt_sh_lookup(domain: str) -> dict:
                 "categories": categories,
                 "all_subdomains": sorted(subdomains)[:50]  # Limit to 50
             }
-    except Exception as e:
+
+    except httpx.TimeoutException:
+        logger.warning(f"Timeout querying crt.sh for {domain}")
         return {
             "success": False,
             "domain": domain,
-            "error": str(e)
+            "error": "Request timed out after 30 seconds"
+        }
+
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"HTTP error querying crt.sh for {domain}: {e.response.status_code}")
+        return {
+            "success": False,
+            "domain": domain,
+            "error": f"HTTP {e.response.status_code}: {e.response.reason_phrase}"
+        }
+
+    except Exception as e:
+        logger.exception(f"Unexpected error querying crt.sh for {domain}")
+        return {
+            "success": False,
+            "domain": domain,
+            "error": f"Unexpected error: {str(e)}"
         }
 
 

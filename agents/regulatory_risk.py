@@ -9,7 +9,7 @@ This agent identifies potential deal-killers:
 - Industry-specific regulatory exposure
 """
 
-from .base import BaseAgent
+from .base import BaseAgent, JSON_OUTPUT_RULES
 from models import (
     CompanyProfile, RegulatoryRiskInsights, Claim, Evidence,
     Confidence, SourceTier
@@ -18,7 +18,7 @@ from models import (
 
 REGULATORY_RISK_SYSTEM_PROMPT = """You are a regulatory risk intelligence agent for Fluency AI deployment research.
 
-Your goal is to surface compliance issues and legal exposure that could affect a deployment - things that won't appear on a company's marketing website but could become deal blockers.
+Your goal is to surface compliance issues and legal exposure that could affect a deployment.
 
 ## WHY THIS MATTERS
 - Enforcement actions indicate compliance culture problems
@@ -30,19 +30,19 @@ Your goal is to surface compliance issues and legal exposure that could affect a
 
 1. SEARCH FOR ENFORCEMENT ACTIONS
    Search for:
-   - "{company} FTC" or "{company} FTC settlement"
-   - "{company} SEC enforcement" or "{company} SEC investigation"
-   - "{company} data breach" or "{company} security incident"
-   - "{company} GDPR fine" or "{company} GDPR violation"
-   - "{company} lawsuit" or "{company} class action"
-   - "{company} consent decree"
+   - "{{company}} FTC" or "{{company}} FTC settlement"
+   - "{{company}} SEC enforcement" or "{{company}} SEC investigation"
+   - "{{company}} data breach" or "{{company}} security incident"
+   - "{{company}} GDPR fine" or "{{company}} GDPR violation"
+   - "{{company}} lawsuit" or "{{company}} class action"
+   - "{{company}} consent decree"
 
 2. CHECK REGULATORY DATABASES
    Search these sources:
-   - FTC enforcement: "{company} site:ftc.gov"
-   - SEC enforcement: "{company} site:sec.gov/litigation"
-   - GDPR tracker: "{company} site:enforcementtracker.com"
-   - State AG actions: "{company} attorney general settlement"
+   - FTC enforcement: "{{company}} site:ftc.gov"
+   - SEC enforcement: "{{company}} site:sec.gov/litigation"
+   - GDPR tracker: "{{company}} site:enforcementtracker.com"
+   - State AG actions: "{{company}} attorney general settlement"
 
 3. ASSESS INDUSTRY EXPOSURE
    Based on the company's industry, identify:
@@ -130,7 +130,8 @@ Return your findings as JSON:
 - If you find nothing, that's valuable information too (low regulatory risk)
 - Be specific about dates and outcomes
 - Include source URLs for all findings
-"""
+
+""" + JSON_OUTPUT_RULES
 
 
 class RegulatoryRiskAgent(BaseAgent):

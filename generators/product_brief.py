@@ -2,16 +2,159 @@
 Product Brief Generator - Creates stakeholder-specific output for product teams.
 """
 
+from typing import Optional
 from models import CompanyProfile, SynthesisOutput, ResearchResults
+from .dedup import deduplicate_by_field
+from .evidence_classifier import classify_integration, format_badge, get_evidence_legend
+
+
+def _format_ai_integration_complexity(complexity: dict) -> list[str]:
+    """Format AI-generated integration complexity assessment."""
+    lines = []
+    if not complexity:
+        return lines
+
+    overall = complexity.get("overall", "Unknown")
+    factors = complexity.get("factors", [])
+
+    lines.append("## Integration Complexity Assessment")
+    lines.append("")
+    lines.append(f"**Overall Complexity: {overall}**")
+    lines.append("")
+
+    if factors:
+        lines.append("| System | Complexity | Notes |")
+        lines.append("|--------|------------|-------|")
+        for factor in factors[:8]:
+            system = factor.get("system", "Unknown").replace("|", "\\|")
+            comp = factor.get("complexity", "Unknown")
+            notes = factor.get("notes", "").replace("|", "\\|")
+            lines.append(f"| {system} | {comp} | {notes} |")
+        lines.append("")
+
+    return lines
+
+
+def _format_ai_tech_compatibility(compatibility: dict) -> list[str]:
+    """Format AI-generated tech stack compatibility."""
+    lines = []
+    if not compatibility:
+        return lines
+
+    compatible = compatibility.get("compatible", [])
+    needs_verification = compatibility.get("needs_verification", [])
+    blockers = compatibility.get("blockers", [])
+
+    if not (compatible or needs_verification or blockers):
+        return lines
+
+    lines.append("## Tech Stack Compatibility")
+    lines.append("")
+
+    if compatible:
+        lines.append("**Compatible Technologies:**")
+        for tech in compatible[:6]:
+            lines.append(f"- :white_check_mark: {tech}")
+        lines.append("")
+
+    if needs_verification:
+        lines.append("**Needs Verification:**")
+        for tech in needs_verification[:4]:
+            lines.append(f"- :question: {tech}")
+        lines.append("")
+
+    if blockers:
+        lines.append("**Potential Blockers:**")
+        for blocker in blockers[:3]:
+            lines.append(f"- :x: {blocker}")
+        lines.append("")
+
+    return lines
+
+
+def _format_ai_implementation_roadmap(roadmap: dict) -> list[str]:
+    """Format AI-generated implementation roadmap."""
+    lines = []
+    if not roadmap:
+        return lines
+
+    approach = roadmap.get("approach", "Unknown")
+    phases = roadmap.get("phases", [])
+
+    if not phases:
+        return lines
+
+    lines.append("## Recommended Implementation Roadmap")
+    lines.append("")
+    lines.append(f"**Approach: {approach}**")
+    lines.append("")
+
+    for phase in phases[:4]:
+        phase_num = phase.get("phase", "?")
+        duration = phase.get("duration", "TBD")
+        scope = phase.get("scope", "")
+
+        lines.append(f"### Phase {phase_num} ({duration})")
+        lines.append("")
+        if scope:
+            lines.append(f"{scope}")
+            lines.append("")
+
+    return lines
+
+
+def _format_ai_deployment_risks(risks: list) -> list[str]:
+    """Format AI-generated deployment risks."""
+    lines = []
+    if not risks:
+        return lines
+
+    lines.append("## Deployment Risks")
+    lines.append("")
+    lines.append("| Risk | Probability | Impact | Mitigation |")
+    lines.append("|------|-------------|--------|------------|")
+
+    for risk in risks[:6]:
+        risk_desc = risk.get("risk", "").replace("|", "\\|")
+        probability = risk.get("probability", "UNKNOWN")
+        impact = risk.get("impact", "UNKNOWN")
+        mitigation = risk.get("mitigation", "").replace("|", "\\|")
+        lines.append(f"| {risk_desc} | {probability} | {impact} | {mitigation} |")
+
+    lines.append("")
+    return lines
+
+
+def _format_ai_success_factors(factors: list) -> list[str]:
+    """Format AI-generated success factors."""
+    lines = []
+    if not factors:
+        return lines
+
+    lines.append("## Critical Success Factors")
+    lines.append("")
+
+    for i, factor in enumerate(factors[:6], 1):
+        lines.append(f"{i}. {factor}")
+
+    lines.append("")
+    return lines
 
 
 def generate_product_brief(
     profile: CompanyProfile,
     synthesis: SynthesisOutput,
-    research: ResearchResults
+    research: ResearchResults,
+    ai_refinements: Optional[dict] = None
 ) -> str:
     """
     Generate a product-focused brief for implementation planning.
+
+    Args:
+        profile: Company profile data
+        synthesis: Synthesis output with scores and recommendations
+        research: Research results from all agents
+        ai_refinements: Optional AI-generated refinements from BriefRefinerAgent
 
     Returns markdown-formatted string.
     """
@@ -23,18 +166,10 @@ def generate_product_brief(
     lines.append(f"**Fluency AI Implementation Planning**")
     lines.append("")
 
-    # Company Context
+    # Company Context (minimal - see Executive Brief for full intel)
     lines.append("## Company Context")
     lines.append("")
-    lines.append(f"| Field | Value |")
-    lines.append(f"|-------|-------|")
-    lines.append(f"| **Company** | {profile.name} |")
-    lines.append(f"| **Domain** | {profile.domain} |")
-    lines.append(f"| **Industry** | {profile.industry} |")
-    lines.append(f"| **Type** | {profile.company_type.value} |")
-    lines.append(f"| **Employees** | {profile.employee_count or 'Unknown'} |")
-    lines.append("")
-    lines.append(f"> {profile.description}")
+    lines.append(f"**{profile.name}** | {profile.company_type.value} | {profile.employee_count or 'Unknown'} employees")
     lines.append("")
 
     # Integration Landscape
@@ -50,21 +185,24 @@ def generate_product_brief(
         # Core Infrastructure
         lines.append("### Core Infrastructure")
         lines.append("")
-        lines.append(f"| Component | Detected | Confidence |")
-        lines.append(f"|-----------|----------|------------|")
-        lines.append(f"| Identity Provider | {tech.identity_provider or 'Unknown'} | {'HIGH' if tech.identity_provider else 'N/A'} |")
-        lines.append(f"| Cloud Provider | {tech.cloud_provider or 'Unknown'} | {'HIGH' if tech.cloud_provider else 'N/A'} |")
+        lines.append(f"| Component | Detected | Evidence |")
+        lines.append(f"|-----------|----------|----------|")
+        lines.append(f"| Identity Provider | {tech.identity_provider or 'Unknown'} | {'[V]' if tech.identity_provider else '[U]'} |")
+        lines.append(f"| Cloud Provider | {tech.cloud_provider or 'Unknown'} | {'[V]' if tech.cloud_provider else '[U]'} |")
         lines.append("")
 
-        # All Integrations
+        # All Integrations (deduplicated by tool name)
         if tech.integrations:
             lines.append("### Detected Integrations")
             lines.append("")
-            lines.append(f"| Tool | Category | Confidence | Evidence |")
-            lines.append(f"|------|----------|------------|----------|")
-            for integration in tech.integrations:
-                evidence_link = f"[Source]({integration.evidence.url})" if integration.evidence else "Inferred"
-                lines.append(f"| {integration.tool_name} | {integration.category} | {integration.confidence.value} | {evidence_link} |")
+            lines.append(f"| Tool | Category | Evidence | Source |")
+            lines.append(f"|------|----------|----------|--------|")
+            unique_integrations = deduplicate_by_field(tech.integrations, "tool_name")
+            for integration in unique_integrations:
+                ev_class, has_conflict = classify_integration(integration)
+                badge = format_badge(ev_class, has_conflict)
+                evidence_link = integration.evidence.url if integration.evidence else "N/A"
+                lines.append(f"| {integration.tool_name} | {integration.category} | {badge} | {evidence_link} |")
             lines.append("")
 
         # Subdomains Analysis
@@ -159,34 +297,22 @@ def generate_product_brief(
             lines.append(f"- {cons}")
         lines.append("")
 
-    # AI/Automation Readiness
-    lines.append("## AI/Automation Readiness")
-    lines.append("")
-    lines.append(f"**Strategic Alignment Score: {score.strategic_alignment}/10**")
-    lines.append("")
+    # AI-Generated Sections (if available)
+    if ai_refinements:
+        # Integration Complexity
+        lines.extend(_format_ai_integration_complexity(ai_refinements.get("integration_complexity", {})))
 
-    if research.strategic:
-        strat = research.strategic
+        # Tech Stack Compatibility
+        lines.extend(_format_ai_tech_compatibility(ai_refinements.get("tech_stack_compatibility", {})))
 
-        if strat.ai_initiatives:
-            lines.append("### Existing AI Initiatives")
-            lines.append("")
-            for initiative in strat.ai_initiatives:
-                lines.append(f"- {initiative.claim}")
-                if initiative.evidence:
-                    lines.append(f"  - Source: {initiative.evidence[0].url}")
-            lines.append("")
+        # Implementation Roadmap
+        lines.extend(_format_ai_implementation_roadmap(ai_refinements.get("implementation_roadmap", {})))
 
-        if strat.partnerships:
-            tech_partners = [p for p in strat.partnerships
-                           if any(kw in p.claim.lower() for kw in
-                                  ['technology', 'software', 'cloud', 'ai', 'digital', 'microsoft', 'google', 'aws', 'salesforce'])]
-            if tech_partners:
-                lines.append("### Technology Partnerships")
-                lines.append("")
-                for partner in tech_partners:
-                    lines.append(f"- {partner.claim}")
-                lines.append("")
+        # Deployment Risks
+        lines.extend(_format_ai_deployment_risks(ai_refinements.get("deployment_risks", [])))
+
+        # Success Factors
+        lines.extend(_format_ai_success_factors(ai_refinements.get("success_factors", [])))
 
     # Implementation Considerations
     lines.append("## Implementation Considerations")
@@ -260,37 +386,10 @@ def generate_product_brief(
         lines.append("- Standard complexity expected")
     lines.append("")
 
-    # Technical Evidence
-    lines.append("## Technical Evidence Summary")
-    lines.append("")
-    lines.append(f"| Category | Claims | High Confidence |")
-    lines.append(f"|----------|--------|-----------------|")
-
-    tech_claims = len(synthesis.evidence_graph.technology_claims)
-    tech_high = sum(1 for c in synthesis.evidence_graph.technology_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Technology | {tech_claims} | {tech_high} |")
-
-    sec_claims = len(synthesis.evidence_graph.security_claims)
-    sec_high = sum(1 for c in synthesis.evidence_graph.security_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Security | {sec_claims} | {sec_high} |")
-
-    strat_claims = len(synthesis.evidence_graph.strategic_claims)
-    strat_high = sum(1 for c in synthesis.evidence_graph.strategic_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Strategic | {strat_claims} | {strat_high} |")
-    lines.append("")
-
-    # Detailed Technology Claims
-    if synthesis.evidence_graph.technology_claims:
-        lines.append("### Technology Claims Detail")
-        lines.append("")
-        for claim in synthesis.evidence_graph.technology_claims:
-            lines.append(f"- **{claim.claim}** [{claim.confidence.value}]")
-            if claim.evidence:
-                lines.append(f"  - Source: {claim.evidence[0].url}")
-        lines.append("")
+    # Evidence Legend
+    lines.extend(get_evidence_legend())
 
     # Footer
-    lines.append("---")
     lines.append("*Generated by Fluency AI Research Agent*")
 
     return "\n".join(lines)

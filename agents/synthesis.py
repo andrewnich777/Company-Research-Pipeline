@@ -9,119 +9,44 @@ from models import (
     CompanyProfile, ResearchResults, SynthesisOutput,
     EvidenceGraph, DeploymentScore, Claim, Evidence, Confidence, SourceTier
 )
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
-SYNTHESIS_SYSTEM_PROMPT = """You are a synthesis agent for Fluency AI deployment preparation.
+SYNTHESIS_SYSTEM_PROMPT = """Synthesis agent for Fluency AI deployment research.
 
-## ABOUT FLUENCY AI
-Fluency AI is an enterprise process intelligence platform that:
-- Captures and documents business processes automatically
-- Uses AI to analyze workflows and identify optimization opportunities
-- Integrates with existing tools (Confluence, ServiceNow, Jira, SharePoint, etc.)
-- Requires SSO integration (SAML 2.0, OIDC) - works best with Okta, Azure AD, Ping, OneLogin
-- Offers SOC 2 Type II compliance, HIPAA-ready, GDPR compliant
-- Deploys in AWS (US, EU regions available)
+FLUENCY AI: Enterprise process intelligence platform. Auto-documents workflows, AI analysis, integrates with Confluence/ServiceNow/Jira/SharePoint. Requires SSO (Okta/Azure AD/Ping/OneLogin preferred). SOC 2 Type II, HIPAA-ready, GDPR compliant. AWS deployment (US/EU).
 
-## YOUR TASK
-Combine research findings from multiple agents into actionable deployment intelligence.
+YOUR TASKS:
 
-You will receive:
-1. Company Profile (basic info, type, industry)
-2. Security Findings (certifications, trust center, compliance)
-3. Tech Stack Findings (integrations, identity provider, cloud)
-4. Strategic Findings (news, AI initiatives, partnerships)
-5. Financial Findings (SEC filings, risk factors - for public companies only)
-6. **DEEP INTELLIGENCE** (new):
-   - Job Posting Insights (actual tech stack, hiring velocity, process tools)
-   - Customer Review Insights (pain points, integration challenges, competitor mentions)
-   - Regulatory Risk Insights (enforcement actions, data breaches, litigation)
-   - Stakeholder Intelligence (technical leaders, potential champions)
+1. BUILD EVIDENCE GRAPH - Every claim needs source URL + confidence (HIGH/MEDIUM/LOW). Group by: Security, Technology, Strategic, Financial, Hiring, CustomerSentiment, Regulatory, Stakeholder.
 
-## YOUR JOB
+2. DETECT CONTRADICTIONS - Flag conflicting info, time-sensitive claims, unresolved conflicts.
 
-1. BUILD EVIDENCE GRAPH
-   - Every claim must have a source URL and confidence level
-   - Group claims by category (Security, Technology, Strategic, Financial)
-   - Prioritize claims that affect Fluency deployment feasibility
+3. SCORE DEPLOYMENT READINESS (1-10 scale):
 
-2. DETECT CONTRADICTIONS
-   - Look for conflicting information between sources
-   - Flag any time-sensitive claims (e.g., "as of 2023" vs newer info)
-   - Note unresolved contradictions for human review
+Score each dimension using your judgment based on the evidence collected.
+Weight VERIFIED evidence heavily, SOURCED evidence moderately, and
+INFERRED evidence lightly. UNKNOWN gaps should lower confidence.
 
-3. ASSESS DEPLOYMENT READINESS (Fluency-Specific Scoring)
-   Score the company on these factors (1-10 scale):
+Dimensions to assess:
+a) Security Maturity - Trust center presence, certifications, incident history
+b) Integration Fit - SSO compatibility, cloud alignment, existing tool overlap
+c) Compliance Complexity - Industry regulations, data residency, audit burden
+d) Strategic Alignment - AI/automation initiatives, executive buy-in, process focus
+e) Deal Complexity - Company size, geography, org structure complexity
+f) Champion Identified - Internal advocate presence, influence level
+g) Procurement Clarity - Budget cycles, approval process visibility
+h) Regulatory Risk - Enforcement history, litigation, breach exposure
 
-   a) Security Maturity (weight: 25%)
-      - Has trust center? +3
-      - SOC 2 Type II? +3 (Fluency is SOC 2 compliant)
-      - ISO 27001? +2
-      - Other certs (HIPAA, FedRAMP, PCI)? +1 each (max +2)
-      - No security incidents? +2
-      - Security incidents? -3 to -5
+For each score, consider the company's specific context. A startup with no
+certifications is not the same risk as an enterprise with none. Provide
+reasoning in the rationale field explaining your judgment.
 
-   b) Integration Fit (weight: 25%) - FLUENCY SPECIFIC
-      - Fluency-compatible IdP (Okta, Azure AD, Ping, OneLogin)? +4
-      - Other SAML/OIDC provider? +2
-      - No SSO info? -1
-      - AWS cloud (best Fluency fit)? +2
-      - Azure cloud (good fit)? +2
-      - GCP (compatible)? +1
-      - Process documentation tools (Confluence, ServiceNow, Notion, SharePoint)? +2
-      - Uses process mining tools (Celonis, UiPath)? +3 (complementary)
-      - Modern tech stack signals? +1
+4. GENERATE INSIGHTS: Opportunities, blockers, recommended sales approach, discovery questions for gaps.
 
-   c) Compliance Complexity (weight: 20%)
-      - Healthcare industry (HIPAA required)? +1 (Fluency is HIPAA-ready)
-      - Healthcare but no HIPAA infrastructure? -2
-      - Financial services (SOX, FINRA)? -1
-      - EU operations (GDPR)? +1 (Fluency has EU deployment)
-      - EU operations with data residency concerns? -1
-      - FedRAMP required? -4 (Fluency not FedRAMP certified)
-      - Simple compliance landscape? +2
-
-   d) Strategic Alignment (weight: 15%) - AI READINESS
-      - Active AI/automation initiatives? +3
-      - AI transformation announced? +2
-      - Process improvement projects? +2
-      - Executive quotes about efficiency/automation? +2
-      - Hiring AI/ML roles? +2
-      - Digital transformation initiative? +2
-      - No apparent AI interest? -2
-
-   e) Deal Complexity (weight: 15%)
-      - Public company (more procurement process)? -1
-      - 5000+ employees (enterprise deal)? -1
-      - 1000-5000 employees (mid-market sweet spot)? +2
-      - Startup/growth stage (fast decisions)? +1
-      - EU operations (works council risk)? -2
-      - Multiple global regions? -1
-
-   f) Champion Identified (NEW - from stakeholder intel)
-      - Technical champion identified with clear signals? +4
-      - Multiple potential champions found? +3
-      - Only executives found (no mid-level champions)? +1
-      - No champion identified? -2
-
-   g) Procurement Clarity (NEW)
-      - Clear procurement process signals? +3
-      - Stakeholders with budget authority identified? +2
-      - Organization structure understood? +2
-      - Opaque/unknown procurement process? -2
-
-   h) Regulatory Risk (NEW - from regulatory intel)
-      - No enforcement actions or breaches found? +3
-      - Historical issues only (>2 years)? +1
-      - Active litigation or recent breaches? -3
-      - High regulatory exposure in industry? -2
-
-4. GENERATE FLUENCY-SPECIFIC INSIGHTS
-   - Key opportunities for Fluency deployment
-   - Potential blockers or concerns
-   - Recommended sales approach based on findings
-   - Specific discovery questions based on gaps in research
-
-Return your synthesis as JSON:
+OUTPUT JSON:
 ```json
 {
   "evidence_graph": {
@@ -460,13 +385,13 @@ Conference Speakers: {len(sh.conference_speakers)} found
                 try:
                     confidence = Confidence(item.get("confidence", "MEDIUM"))
                 except ValueError:
-                    pass
+                    logger.debug(f"Invalid confidence value '{item.get('confidence')}' in {category} claim, defaulting to MEDIUM")
 
                 source_tier = SourceTier.TIER_2
                 try:
                     source_tier = SourceTier(item.get("source_tier", "TIER_2"))
                 except ValueError:
-                    pass
+                    logger.debug(f"Invalid source tier '{item.get('source_tier')}' in {category} claim, defaulting to TIER_2")
 
                 evidence = []
                 if item.get("source_url"):

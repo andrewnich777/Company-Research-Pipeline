@@ -20,6 +20,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+# Load .env file before other imports
+from config import get_config
+
 from agents import set_api_key
 from pipeline import ResearchPipeline
 
@@ -39,6 +42,7 @@ Examples:
     %(prog)s stripe.com
     %(prog)s https://aon.com --output ./research-results
     %(prog)s vanta.com --quiet
+    %(prog)s ramp.com --resynthesize  # Rerun synthesis only with cached data
 
 The agent will:
   1. Discover and classify the company (PUBLIC/PRIVATE/STARTUP)
@@ -93,6 +97,12 @@ Output files are saved to the --output directory:
         "--resume",
         action="store_true",
         help="Resume from checkpoint if available (skips completed agents)"
+    )
+
+    parser.add_argument(
+        "--resynthesize",
+        action="store_true",
+        help="Rerun only synthesis and output generation using cached research data (no new API calls for research)"
     )
 
     return parser
@@ -185,9 +195,16 @@ async def main_async(args: argparse.Namespace) -> int:
     """Async main function."""
     verbose = not args.quiet
 
-    # Set API key if provided
-    if args.api_key:
-        set_api_key(args.api_key)
+    # Set API key - prefer command line arg, then config/env
+    config = get_config()
+    api_key = args.api_key or config.api_key
+
+    if api_key:
+        set_api_key(api_key)
+    else:
+        console.print("[bold red]Error:[/bold red] No API key found.")
+        console.print("Set ANTHROPIC_API_KEY in .env file or pass --api-key argument.")
+        return 1
 
     if verbose:
         console.print(Panel.fit(
@@ -199,7 +216,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
     try:
         pipeline = ResearchPipeline(output_dir=args.output, verbose=verbose, resume=args.resume)
-        result = await pipeline.run(args.url)
+
+        if args.resynthesize:
+            # Rerun only synthesis and output using cached data
+            result = await pipeline.resynthesize(args.url)
+        else:
+            result = await pipeline.run(args.url)
 
         if verbose:
             console.print()

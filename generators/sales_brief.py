@@ -2,7 +2,11 @@
 Sales Brief Generator - Creates stakeholder-specific output for sales teams.
 """
 
+from typing import Optional
 from models import CompanyProfile, SynthesisOutput, ResearchResults
+from .dedup import BriefDeduplicator
+from .recommendation_engine import generate_score_based_recommendation, get_score_summary
+from .evidence_classifier import classify_claim, format_badge, get_evidence_legend
 
 
 # Industries that typically require BAA (Healthcare)
@@ -101,13 +105,162 @@ def _generate_contextual_questions(
     return questions
 
 
+def _format_ai_talking_points(talking_points: list) -> list[str]:
+    """Format AI-generated talking points."""
+    lines = []
+    if not talking_points:
+        return lines
+
+    lines.append("## AI-Generated Talking Points")
+    lines.append("")
+
+    for tp in talking_points[:5]:
+        topic = tp.get("topic", "General")
+        point = tp.get("point", "")
+        source = tp.get("source", "")
+        objection = tp.get("objection", "")
+        response = tp.get("response", "")
+
+        lines.append(f"### {topic}")
+        lines.append("")
+        lines.append(f"**Point:** {point}")
+        if source:
+            lines.append(f"*Source: {source}*")
+        lines.append("")
+
+        if objection and response:
+            lines.append(f"**Likely Objection:** {objection}")
+            lines.append(f"**Response:** {response}")
+            lines.append("")
+
+    return lines
+
+
+def _format_ai_objection_handlers(handlers: list) -> list[str]:
+    """Format AI-generated objection handlers."""
+    lines = []
+    if not handlers:
+        return lines
+
+    lines.append("## Objection Handlers")
+    lines.append("")
+    lines.append("| Objection | Response | Evidence |")
+    lines.append("|-----------|----------|----------|")
+
+    for handler in handlers[:5]:
+        objection = handler.get("objection", "").replace("|", "\\|")
+        response = handler.get("response", "").replace("|", "\\|")
+        evidence = handler.get("evidence", "").replace("|", "\\|")
+        lines.append(f"| {objection} | {response} | {evidence} |")
+
+    lines.append("")
+    return lines
+
+
+def _format_ai_champion_engagement(champion: dict) -> list[str]:
+    """Format AI-generated champion engagement strategy."""
+    lines = []
+    if not champion or not champion.get("primary"):
+        return lines
+
+    lines.append("## Champion Engagement Strategy")
+    lines.append("")
+    lines.append(f"**Primary Target:** {champion.get('primary', 'Unknown')}")
+    lines.append("")
+    if champion.get("why"):
+        lines.append(f"**Why This Person:** {champion.get('why')}")
+        lines.append("")
+    if champion.get("approach"):
+        lines.append(f"**Recommended Approach:** {champion.get('approach')}")
+        lines.append("")
+
+    return lines
+
+
+def _format_ai_competitive_positioning(positioning: dict) -> list[str]:
+    """Format AI-generated competitive positioning."""
+    lines = []
+    if not positioning:
+        return lines
+
+    competitors = positioning.get("competitors", [])
+    differentiation = positioning.get("differentiation", [])
+    win_themes = positioning.get("win_themes", [])
+
+    if not (competitors or differentiation or win_themes):
+        return lines
+
+    lines.append("## Competitive Positioning")
+    lines.append("")
+
+    if competitors:
+        lines.append(f"**Competitors in Play:** {', '.join(competitors)}")
+        lines.append("")
+
+    if differentiation:
+        lines.append("**Key Differentiators:**")
+        for diff in differentiation[:5]:
+            lines.append(f"- {diff}")
+        lines.append("")
+
+    if win_themes:
+        lines.append("**Win Themes:**")
+        for theme in win_themes[:3]:
+            lines.append(f"- {theme}")
+        lines.append("")
+
+    return lines
+
+
+def _format_ai_deal_velocity(signals: dict) -> list[str]:
+    """Format AI-generated deal velocity signals."""
+    lines = []
+    if not signals:
+        return lines
+
+    positive = signals.get("positive", [])
+    negative = signals.get("negative", [])
+    timeline = signals.get("recommended_timeline", "")
+
+    if not (positive or negative or timeline):
+        return lines
+
+    lines.append("## Deal Velocity Signals")
+    lines.append("")
+
+    if positive:
+        lines.append("**Positive Signals:**")
+        for sig in positive[:4]:
+            lines.append(f"- :green_circle: {sig}")
+        lines.append("")
+
+    if negative:
+        lines.append("**Negative Signals:**")
+        for sig in negative[:4]:
+            lines.append(f"- :red_circle: {sig}")
+        lines.append("")
+
+    if timeline:
+        lines.append(f"**Recommended Timeline:** {timeline}")
+        lines.append("")
+
+    return lines
+
+
 def generate_sales_brief(
     profile: CompanyProfile,
     synthesis: SynthesisOutput,
-    research: ResearchResults
+    research: ResearchResults,
+    ai_refinements: Optional[dict] = None
 ) -> str:
     """
     Generate a sales-focused brief with talking points and discovery questions.
+
+    Args:
+        profile: Company profile data
+        synthesis: Synthesis output with scores and recommendations
+        research: Research results from all agents
+        ai_refinements: Optional AI-generated refinements from BriefRefinerAgent
 
     Returns markdown-formatted string.
     """
@@ -116,23 +269,9 @@ def generate_sales_brief(
     # Header
     lines.append(f"# Sales Brief: {profile.name}")
     lines.append("")
-    lines.append(f"**Generated for Fluency AI Pre-Sales**")
+    lines.append(f"**Fluency AI Pre-Sales Positioning**")
     lines.append("")
-
-    # Company Snapshot
-    lines.append("## Company Snapshot")
-    lines.append("")
-    lines.append(f"| Field | Value |")
-    lines.append(f"|-------|-------|")
-    lines.append(f"| **Company** | {profile.name} |")
-    lines.append(f"| **Industry** | {profile.industry} |")
-    lines.append(f"| **Type** | {profile.company_type.value} |")
-    lines.append(f"| **Headquarters** | {profile.hq_location or 'Unknown'} |")
-    lines.append(f"| **Employees** | {profile.employee_count or 'Unknown'} |")
-    if profile.ticker:
-        lines.append(f"| **Ticker** | {profile.ticker} |")
-    lines.append("")
-    lines.append(f"> {profile.description}")
+    lines.append(f"*See Executive Brief for full company intelligence, blockers, and discovery questions.*")
     lines.append("")
 
     # Deployment Readiness Score
@@ -162,85 +301,87 @@ def generate_sales_brief(
         lines.append("- No specific opportunities identified")
     lines.append("")
 
-    # Potential Blockers
-    lines.append("## Potential Blockers")
-    lines.append("")
-    if synthesis.blockers:
-        for blocker in synthesis.blockers:
-            lines.append(f"- {blocker}")
-    else:
-        lines.append("- No significant blockers identified")
-    lines.append("")
+    # AI-Generated Sections (if available)
+    if ai_refinements:
+        # Talking Points
+        lines.extend(_format_ai_talking_points(ai_refinements.get("talking_points", [])))
 
-    # Recommended Approach
+        # Objection Handlers
+        lines.extend(_format_ai_objection_handlers(ai_refinements.get("objection_handlers", [])))
+
+        # Champion Engagement
+        lines.extend(_format_ai_champion_engagement(ai_refinements.get("champion_engagement", {})))
+
+        # Competitive Positioning
+        lines.extend(_format_ai_competitive_positioning(ai_refinements.get("competitive_positioning", {})))
+
+        # Deal Velocity Signals
+        lines.extend(_format_ai_deal_velocity(ai_refinements.get("deal_velocity_signals", {})))
+
+    # Recommended Approach - Score-based first, then AI-generated context
     lines.append("## Recommended Sales Approach")
     lines.append("")
-    lines.append(synthesis.recommended_approach or "Standard enterprise approach recommended.")
+
+    # Primary: Score-based recommendation with explicit score references
+    score_recommendation = generate_score_based_recommendation(synthesis.deployment_score)
+    lines.append(f"**Based on Scores:** {score_recommendation}")
     lines.append("")
 
-    # Discovery Questions (Enhanced with contextual questions)
-    lines.append("## Discovery Call Questions")
+    # Secondary: AI-generated context if available
+    if synthesis.recommended_approach:
+        lines.append(f"**Additional Context:** {synthesis.recommended_approach}")
+        lines.append("")
+
+    # Score summary for quick reference
+    lines.append(f"*{get_score_summary(synthesis.deployment_score)}*")
     lines.append("")
 
-    discovery_questions = []
-
-    # Start with synthesized questions
-    if synthesis.discovery_questions:
-        discovery_questions.extend(synthesis.discovery_questions)
-
-    # Add contextual questions based on findings
-    contextual_questions = _generate_contextual_questions(profile, research)
-    for q in contextual_questions:
-        if q not in discovery_questions:
-            discovery_questions.append(q)
-
-    # Default questions if still empty
-    if not discovery_questions:
-        discovery_questions = [
-            "What are your current process documentation challenges?",
-            "How do you ensure compliance with regulatory requirements?",
-            "What automation initiatives are currently in progress?",
-        ]
-
-    for i, question in enumerate(discovery_questions[:10], 1):
-        lines.append(f"{i}. {question}")
-    lines.append("")
-
-    # Strategic Context
+    # Strategic Context - with within-document deduplication
     lines.append("## Strategic Context")
     lines.append("")
 
-    # AI Initiatives
-    if research.strategic and research.strategic.ai_initiatives:
-        lines.append("### AI/Automation Initiatives")
-        lines.append("")
-        for claim in research.strategic.ai_initiatives[:5]:
-            lines.append(f"- {claim.claim}")
-            if claim.evidence:
-                lines.append(f"  - Source: {claim.evidence[0].url}")
-        lines.append("")
-
-    # Executive Quotes
-    if research.strategic and research.strategic.executive_quotes:
-        lines.append("### Executive Quotes")
-        lines.append("")
-        for quote in research.strategic.executive_quotes[:3]:
-            lines.append(f"> {quote.claim}")
-            if quote.evidence:
-                lines.append(f"> — Source: {quote.evidence[0].url}")
+    # Use deduplicator to track seen claims within this brief
+    with BriefDeduplicator() as dedup:
+        # AI Initiatives (deduplicated)
+        if research.strategic and research.strategic.ai_initiatives:
+            lines.append("### AI/Automation Initiatives")
+            lines.append("")
+            unique_initiatives = dedup.claims(research.strategic.ai_initiatives[:5])
+            for claim in unique_initiatives:
+                ev_class, has_conflict = classify_claim(claim)
+                badge = format_badge(ev_class, has_conflict)
+                lines.append(f"- {claim.claim} {badge}")
+                if claim.evidence:
+                    lines.append(f"  - Source: {claim.evidence[0].url}")
             lines.append("")
 
-    # Recent News
-    if research.strategic and research.strategic.recent_news:
-        lines.append("### Recent News")
-        lines.append("")
-        for news in research.strategic.recent_news[:5]:
-            lines.append(f"- {news.claim}")
-            if news.evidence:
-                lines.append(f"  - Source: {news.evidence[0].url}")
-        lines.append("")
+        # Executive Quotes (deduplicated)
+        if research.strategic and research.strategic.executive_quotes:
+            lines.append("### Executive Quotes")
+            lines.append("")
+            unique_quotes = dedup.claims(research.strategic.executive_quotes[:3])
+            for quote in unique_quotes:
+                ev_class, has_conflict = classify_claim(quote)
+                badge = format_badge(ev_class, has_conflict)
+                lines.append(f"> {quote.claim} {badge}")
+                if quote.evidence:
+                    lines.append(f"> — Source: {quote.evidence[0].url}")
+                lines.append("")
 
-    # Technology Fit
+        # Recent News (deduplicated)
+        if research.strategic and research.strategic.recent_news:
+            lines.append("### Recent News")
+            lines.append("")
+            unique_news = dedup.claims(research.strategic.recent_news[:5])
+            for news in unique_news:
+                ev_class, has_conflict = classify_claim(news)
+                badge = format_badge(ev_class, has_conflict)
+                lines.append(f"- {news.claim} {badge}")
+                if news.evidence:
+                    lines.append(f"  - Source: {news.evidence[0].url}")
+            lines.append("")
+
+    # Technology Fit (summary only - see Product Brief for full integration details)
     lines.append("## Technology Fit")
     lines.append("")
     if research.tech_stack:
@@ -249,38 +390,12 @@ def generate_sales_brief(
             lines.append(f"**Identity Provider:** {tech.identity_provider}")
         if tech.cloud_provider:
             lines.append(f"**Cloud Provider:** {tech.cloud_provider}")
-        lines.append("")
-
         if tech.integrations:
-            lines.append("### Confirmed Integrations")
-            lines.append("")
-            for integration in tech.integrations:
-                confidence_badge = "HIGH" if integration.confidence.value == "HIGH" else integration.confidence.value
-                lines.append(f"- **{integration.tool_name}** ({integration.category}) - {confidence_badge}")
-            lines.append("")
-
-    # Evidence Summary
-    lines.append("## Evidence Summary")
-    lines.append("")
-    lines.append(f"| Category | Claims | High Confidence |")
-    lines.append(f"|----------|--------|-----------------|")
-
-    sec_claims = len(synthesis.evidence_graph.security_claims)
-    sec_high = sum(1 for c in synthesis.evidence_graph.security_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Security | {sec_claims} | {sec_high} |")
-
-    tech_claims = len(synthesis.evidence_graph.technology_claims)
-    tech_high = sum(1 for c in synthesis.evidence_graph.technology_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Technology | {tech_claims} | {tech_high} |")
-
-    strat_claims = len(synthesis.evidence_graph.strategic_claims)
-    strat_high = sum(1 for c in synthesis.evidence_graph.strategic_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Strategic | {strat_claims} | {strat_high} |")
-
-    fin_claims = len(synthesis.evidence_graph.financial_claims)
-    fin_high = sum(1 for c in synthesis.evidence_graph.financial_claims if c.confidence.value == "HIGH")
-    lines.append(f"| Financial | {fin_claims} | {fin_high} |")
-    lines.append("")
+            lines.append(f"**Integrations Found:** {len(tech.integrations)} *(see Product Brief for details)*")
+        lines.append("")
+    else:
+        lines.append("*Tech stack details pending - see Product Brief*")
+        lines.append("")
 
     # Contradictions
     if synthesis.contradictions:
@@ -293,8 +408,10 @@ def generate_sales_brief(
                 lines.append(f"  - Note: {contradiction['note']}")
         lines.append("")
 
+    # Evidence Legend
+    lines.extend(get_evidence_legend())
+
     # Footer
-    lines.append("---")
     lines.append("*Generated by Fluency AI Research Agent*")
 
     return "\n".join(lines)

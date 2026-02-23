@@ -26,9 +26,73 @@ class SourceTier(str, Enum):
     TIER_2 = "TIER_2"  # Weak sources (blogs, forums)
 
 
+class EvidenceClass(str, Enum):
+    """Classification of how a claim is supported."""
+    VERIFIED = "V"    # URL + direct quote + Tier 0/1 source
+    SOURCED = "S"     # URL + excerpt + Tier 1/2 source
+    INFERRED = "I"    # Derived from signals, no direct evidence
+    UNKNOWN = "U"     # Explicitly searched but not found
+
+
 # ============================================================================
 # Stage 1: Discovery
 # ============================================================================
+
+class URLBank(BaseModel):
+    """
+    Collection of discovered URLs from initial search phase.
+    Agents should prefer fetching these URLs over making new searches.
+    """
+    # Company core pages
+    homepage: Optional[str] = None
+    about_page: Optional[str] = None
+    careers_page: Optional[str] = None
+
+    # Security & Trust
+    trust_center: Optional[str] = None
+    security_page: Optional[str] = None
+    privacy_policy: Optional[str] = None
+    compliance_page: Optional[str] = None
+
+    # Tech & Integrations
+    integrations_page: Optional[str] = None
+    api_docs: Optional[str] = None
+    status_page: Optional[str] = None
+
+    # Social & Professional
+    linkedin_company: Optional[str] = None
+    linkedin_executives: list[str] = Field(default_factory=list)
+    github_org: Optional[str] = None
+
+    # Reviews & Reputation
+    g2_page: Optional[str] = None
+    capterra_page: Optional[str] = None
+    glassdoor_page: Optional[str] = None
+
+    # News & Press
+    news_articles: list[str] = Field(default_factory=list, description="Recent news URLs")
+    press_releases: list[str] = Field(default_factory=list)
+    blog_posts: list[str] = Field(default_factory=list)
+
+    # Jobs
+    job_board_urls: list[str] = Field(default_factory=list, description="LinkedIn jobs, careers page, etc.")
+
+    # Regulatory & Legal
+    sec_filings: list[str] = Field(default_factory=list)
+    regulatory_mentions: list[str] = Field(default_factory=list, description="FTC, breach notices, etc.")
+
+    # Generic discovered URLs by category
+    additional_urls: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Categorized URLs: {category: [urls]}"
+    )
+
+    # Monitoring: track which searches were performed
+    searches_performed: list[str] = Field(
+        default_factory=list,
+        description="Search queries executed during discovery"
+    )
+
 
 class CompanyProfile(BaseModel):
     """Output from Discovery Agent - basic company identification."""
@@ -43,6 +107,7 @@ class CompanyProfile(BaseModel):
     employee_count: Optional[str] = Field(default=None, description="Estimated employee count or range")
     founded_year: Optional[int] = Field(default=None, description="Year founded")
     description: str = Field(default="", description="Brief company description")
+    url_bank: URLBank = Field(default_factory=URLBank, description="Discovered URLs for downstream agents")
 
 
 # ============================================================================
@@ -311,6 +376,177 @@ class LinkedInIntelligence(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
 
 
+class LocalRegulationsInsights(BaseModel):
+    """Output from Local Regulations Agent - regional compliance requirements."""
+
+    operating_regions: list[str] = Field(
+        default_factory=list,
+        description="Detected regions: EU, US-CA, UK, APAC, etc."
+    )
+    applicable_regulations: list[dict] = Field(
+        default_factory=list,
+        description="[{regulation, region, requirements, source}]"
+    )
+    data_localization_required: bool = Field(
+        default=False,
+        description="Whether data must stay in specific regions"
+    )
+    works_council_required: bool = Field(
+        default=False,
+        description="EU works council approval needed for employee-facing deployments"
+    )
+    cross_border_restrictions: list[str] = Field(
+        default_factory=list,
+        description="Restrictions on cross-border data transfer"
+    )
+    compliance_actions: list[str] = Field(
+        default_factory=list,
+        description="Specific actions needed for Fluency deployment"
+    )
+    claims: list[Claim] = Field(default_factory=list)
+
+
+class ProcurementInsights(BaseModel):
+    """Output from Procurement Intelligence Agent - buying process intelligence."""
+
+    fiscal_year_end: Optional[str] = Field(
+        default=None,
+        description="December, June, etc."
+    )
+    budget_planning_cycle: Optional[str] = Field(
+        default=None,
+        description="Q4, Rolling, etc."
+    )
+    procurement_platform: Optional[str] = Field(
+        default=None,
+        description="Coupa, Ariba, Jaggaer, etc."
+    )
+    estimated_approval_timeline: str = Field(
+        default="60-90 days",
+        description="30-60 days, 90+ days, etc."
+    )
+    procurement_complexity: str = Field(
+        default="MEDIUM",
+        description="LOW, MEDIUM, HIGH"
+    )
+    timing_recommendation: str = Field(
+        default="",
+        description="Q1 push, Avoid Q4, etc."
+    )
+    procurement_contacts: list[str] = Field(
+        default_factory=list,
+        description="Roles to engage: CPO, VP Procurement, etc."
+    )
+    claims: list[Claim] = Field(default_factory=list)
+
+
+class ImplementationRiskInsights(BaseModel):
+    """Output from Implementation Risk Agent - deployment risk assessment."""
+
+    risk_level: str = Field(default="MEDIUM", description="LOW, MEDIUM, HIGH")
+    past_implementation_issues: list[Claim] = Field(
+        default_factory=list,
+        description="Evidence of past implementation failures"
+    )
+    tech_debt_signals: list[str] = Field(
+        default_factory=list,
+        description="Legacy system mentions, modernization initiatives"
+    )
+    change_management_concerns: list[str] = Field(
+        default_factory=list,
+        description="Organizational change signals"
+    )
+    integration_complexity: str = Field(
+        default="Moderate",
+        description="Simple, Moderate, Complex"
+    )
+    recommended_approach: str = Field(
+        default="Standard",
+        description="Standard, Phased, Pilot-first"
+    )
+    success_factors: list[str] = Field(
+        default_factory=list,
+        description="What needs to be true for success"
+    )
+    risk_mitigations: list[str] = Field(
+        default_factory=list,
+        description="Actions to reduce implementation risk"
+    )
+    claims: list[Claim] = Field(default_factory=list)
+
+
+class OperationalCultureInsights(BaseModel):
+    """Output from Operational Culture Agent - methodology and process maturity."""
+
+    culture_type: str = Field(
+        default="Unknown",
+        description="SRE-focused, Agile-focused, ITSM-focused, Hybrid"
+    )
+    methodology_signals: list[str] = Field(
+        default_factory=list,
+        description="DORA metrics, ITIL, Scrum, etc."
+    )
+    reliability_priority: str = Field(
+        default="MEDIUM",
+        description="HIGH, MEDIUM, LOW"
+    )
+    velocity_priority: str = Field(
+        default="MEDIUM",
+        description="HIGH, MEDIUM, LOW"
+    )
+    deployment_approach: str = Field(
+        default="Unknown",
+        description="Continuous, Scheduled releases, CAB-gated"
+    )
+    positioning_recommendation: str = Field(
+        default="",
+        description="How to lead the sales conversation"
+    )
+    keywords_to_use: list[str] = Field(
+        default_factory=list,
+        description="Terms that resonate: observability, audit trails, agility"
+    )
+    keywords_to_avoid: list[str] = Field(
+        default_factory=list,
+        description="Terms that will turn them off"
+    )
+    claims: list[Claim] = Field(default_factory=list)
+
+
+class ShadowITInsights(BaseModel):
+    """Output from Shadow IT Agent - legacy systems and hidden tech debt."""
+
+    legacy_systems_detected: list[dict] = Field(
+        default_factory=list,
+        description="[{system, evidence, migration_status}]"
+    )
+    shadow_it_tools: list[str] = Field(
+        default_factory=list,
+        description="Tools used outside official stack"
+    )
+    tech_debt_level: str = Field(
+        default="MEDIUM",
+        description="LOW, MEDIUM, HIGH"
+    )
+    modernization_in_progress: bool = Field(
+        default=False,
+        description="Active modernization/migration initiatives"
+    )
+    hidden_dependencies: list[str] = Field(
+        default_factory=list,
+        description="Systems Fluency must integrate with"
+    )
+    integration_story: str = Field(
+        default="Standard",
+        description="Legacy Connector vs Pure Cloud positioning"
+    )
+    deal_risk: str = Field(
+        default="",
+        description="Risk assessment for custom integration work"
+    )
+    claims: list[Claim] = Field(default_factory=list)
+
+
 class ResearchResults(BaseModel):
     """Combined research from all Stage 2 agents."""
 
@@ -324,6 +560,12 @@ class ResearchResults(BaseModel):
     regulatory_risk: Optional[RegulatoryRiskInsights] = None
     stakeholders: Optional[StakeholderIntelligence] = None
     linkedin_intel: Optional[LinkedInIntelligence] = None
+    # Deployment success agents
+    local_regulations: Optional[LocalRegulationsInsights] = None
+    procurement: Optional[ProcurementInsights] = None
+    implementation_risk: Optional[ImplementationRiskInsights] = None
+    operational_culture: Optional[OperationalCultureInsights] = None
+    shadow_it: Optional[ShadowITInsights] = None
 
 
 # ============================================================================

@@ -4,17 +4,19 @@ Strategic Research Agent - Stage 2 of the research pipeline.
 Researches recent news, AI initiatives, partnerships, and strategic context.
 """
 
-from .base import BaseAgent
+from .base import BaseAgent, URL_BANK_INSTRUCTIONS, JSON_OUTPUT_RULES, build_url_bank_section
 from models import CompanyProfile, StrategicFindings, Claim, Evidence, Confidence, SourceTier
 
 
 STRATEGIC_SYSTEM_PROMPT = """You are a strategic intelligence research agent for Fluency AI sales preparation.
 
-Your task is to research a company's recent strategic context to help sales teams have informed conversations.
+""" + URL_BANK_INSTRUCTIONS + """
 
 Given a company profile, you must:
 
-1. RECENT NEWS (last 90 days) - Search for:
+1. CHECK PRE-DISCOVERED URLs FIRST - Fetch any news_articles or press_releases provided.
+
+2. RECENT NEWS (only search if needed) - Search for:
    - Press releases
    - Major announcements
    - Leadership changes
@@ -97,7 +99,8 @@ Focus on findings relevant to Fluency AI's value proposition:
 - Workflow visibility
 - AI/automation readiness
 - Operational efficiency initiatives
-"""
+
+""" + JSON_OUTPUT_RULES
 
 
 class StrategicAgent(BaseAgent):
@@ -123,6 +126,29 @@ class StrategicAgent(BaseAgent):
 
         Returns StrategicFindings with news, AI initiatives, partnerships, etc.
         """
+        # Build URL bank section if available
+        url_bank = profile.url_bank
+        url_bank_section = ""
+        if url_bank:
+            urls = []
+            if url_bank.news_articles:
+                for i, news_url in enumerate(url_bank.news_articles[:5]):
+                    urls.append(f"- News Article {i+1}: {news_url}")
+            if url_bank.press_releases:
+                for i, pr_url in enumerate(url_bank.press_releases[:3]):
+                    urls.append(f"- Press Release {i+1}: {pr_url}")
+            if url_bank.blog_posts:
+                for i, blog_url in enumerate(url_bank.blog_posts[:2]):
+                    urls.append(f"- Blog Post {i+1}: {blog_url}")
+
+            if urls:
+                url_bank_section = f"""
+## PRE-DISCOVERED URLs (fetch these FIRST, avoid searching)
+{chr(10).join(urls)}
+
+IMPORTANT: Fetch these URLs directly. Only search if these don't provide enough strategic context.
+"""
+
         # Build the research prompt
         prompt = f"""Research the strategic context and recent news for {profile.name}.
 
@@ -131,15 +157,15 @@ Company Details:
 - Type: {profile.company_type.value}
 - Industry: {profile.industry}
 {"- Ticker: " + profile.ticker if profile.ticker else ""}
-
+{url_bank_section}
 Focus on:
-1. Recent news and announcements (last 90 days)
+1. {"Fetch pre-discovered news URLs above, then" if url_bank_section else ""} Recent news and announcements (last 90 days)
 2. AI and automation initiatives
 3. Strategic partnerships
 4. M&A activity
 5. Executive quotes about strategy and operations
 
-Search for "{profile.name} news", "{profile.name} AI", "{profile.name} automation", etc.
+{"Only search if pre-discovered URLs don't provide enough information." if url_bank_section else 'Search for news, AI initiatives, etc.'}
 """
 
         # Run the agent
